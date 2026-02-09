@@ -6,13 +6,13 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
-// Mock CCTV Data
+// Mock CCTV Data (강남/테헤란로 일대 대략 좌표)
 const cameras = [
-  { id: 'C01', x: 25, y: 35, label: '강남역 4번 출구' },
-  { id: 'C02', x: 40, y: 55, label: '테헤란로 교차로' },
-  { id: 'C03', x: 65, y: 30, label: '역삼 하이츠' },
-  { id: 'C04', x: 55, y: 70, label: '코엑스 동문' },
-  { id: 'C05', x: 30, y: 75, label: '선릉 공원' },
+  { id: 'C01', label: '강남역 4번 출구', lat: 37.498095, lng: 127.027610 },
+  { id: 'C02', label: '테헤란로 교차로', lat: 37.501408, lng: 127.039674 },
+  { id: 'C03', label: '역삼 하이츠',     lat: 37.499681, lng: 127.034302 },
+  { id: 'C04', label: '코엑스 동문',     lat: 37.511245, lng: 127.061004 },
+  { id: 'C05', label: '선릉 공원',       lat: 37.504560, lng: 127.049555 },
 ];
 
 export default function AIInvestigation() {
@@ -20,6 +20,97 @@ export default function AIInvestigation() {
   const [query, setQuery] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [results, setResults] = useState<any[]>([]);
+
+  // Kakao 지도 초기화 (AI 정밀 추적용 CCTV 배경 지도)
+  useEffect(() => {
+    const w = window as any;
+
+    if (!w.kakao || !w.kakao.maps) {
+      console.warn("Kakao Maps SDK가 아직 로드되지 않았습니다. (AIInvestigation)");
+      return;
+    }
+
+    w.kakao.maps.load(() => {
+      const container = document.getElementById("ai-map");
+      if (!container) return;
+
+      const options = {
+        // 강남/테헤란로 일대 중심 (모의 CCTV 라벨과 맞추기 위한 대략 좌표)
+        center: new w.kakao.maps.LatLng(37.498095, 127.027610),
+        level: 5,
+      };
+
+      const map = new w.kakao.maps.Map(container, options);
+
+      // 실시간 교통 정보도 함께 표시
+      map.addOverlayMapTypeId(w.kakao.maps.MapTypeId.TRAFFIC);
+
+      // CCTV 아이콘 이미지 (Kakao 샘플 스타일 마커 이미지)
+      // 참고: https://apis.map.kakao.com/web/sample/basicMarkerImage/
+      // 이 프로젝트의 public 폴더에 저장된 CCTV 아이콘 사용
+      // (예: 프로젝트 루트에 public/cctv-icon.png 로 저장)
+      const cctvImageSrc = "/cctv-icon.png";
+      const cctvImageSize = new w.kakao.maps.Size(32, 32);
+      const cctvImageOption = {
+        offset: new w.kakao.maps.Point(16, 32), // 아래 꼭짓점이 좌표에 맞도록 보정
+      };
+      const cctvImage = new w.kakao.maps.MarkerImage(
+        cctvImageSrc,
+        cctvImageSize,
+        cctvImageOption,
+      );
+
+      // CCTV를 지도 마커로 표시하고, 줌 레벨에 따라 토글
+      const markerData: { id: string; marker: any }[] = cameras.map((cam) => {
+        const position = new w.kakao.maps.LatLng(cam.lat, cam.lng);
+
+        const marker = new w.kakao.maps.Marker({
+          position,
+          image: cctvImage,
+          title: cam.label, // 기본 브라우저 툴팁에도 이름 노출
+          clickable: true,
+        });
+
+        // 기본은 지도에 붙여 둠 (줌 레벨에 따라 가렸다가 다시 보이게 함)
+        marker.setMap(map);
+
+        // CCTV 이름 인포윈도우 (클릭 시 열리고 X 버튼으로 닫기 가능)
+        // 참고: https://apis.map.kakao.com/web/sample/basicInfoWindow/
+        const infowindow = new w.kakao.maps.InfoWindow({
+          map, // 미리 어떤 지도에 붙을지 명시
+          position: position,
+          content: `<div style="padding:6px 10px;font-size:12px;white-space:nowrap;color:#111;">${cam.label}</div>`,
+          removable: true,
+        });
+
+        // 마커 클릭 시: 선택 토글 + 인포윈도우 열기
+        w.kakao.maps.event.addListener(marker, 'click', () => {
+          setSelectedCams((prev) =>
+            prev.includes(cam.id)
+              ? prev.filter((id: string) => id !== cam.id)
+              : [...prev, cam.id],
+          );
+          infowindow.open(map, marker);
+        });
+
+        return { id: cam.id, marker };
+      });
+
+      // 특정 줌 레벨 이상에서만 CCTV 마커 보이게
+      const LEVEL_THRESHOLD = 6; // 숫자가 작을수록 더 확대된 상태
+
+      const updateMarkerVisibility = () => {
+        const level = map.getLevel();
+        const visible = level <= LEVEL_THRESHOLD;
+        markerData.forEach(({ marker }) => {
+          marker.setMap(visible ? map : null);
+        });
+      };
+
+      updateMarkerVisibility();
+      w.kakao.maps.event.addListener(map, 'zoom_changed', updateMarkerVisibility);
+    });
+  }, []);
 
   const toggleCam = (id: string) => {
     setSelectedCams(prev => 
@@ -62,40 +153,9 @@ export default function AIInvestigation() {
     <div className="relative w-full h-full overflow-hidden bg-[#0F172A] flex">
       {/* MAP AREA */}
       <div className="flex-1 relative overflow-hidden group">
-         {/* Map Background */}
-         <div className="absolute inset-0 bg-cover bg-center opacity-60 scale-105" 
-              style={{ backgroundImage: 'url("https://images.unsplash.com/photo-1575388902449-6bca946ad549?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080")' }}>
-         </div>
-         <div className="absolute inset-0 bg-slate-900/40"></div>
+        {/* Kakao Map Background for CCTV selection */}
+        <div id="ai-map" className="absolute inset-0 z-0" />
 
-         {/* Grid Overlay */}
-         <div className="absolute inset-0 opacity-10" 
-              style={{ backgroundImage: 'linear-gradient(#06b6d4 1px, transparent 1px), linear-gradient(90deg, #06b6d4 1px, transparent 1px)', backgroundSize: '40px 40px' }}>
-         </div>
-
-         {/* Interactive Cams */}
-         {cameras.map(cam => {
-           const isSelected = selectedCams.includes(cam.id);
-           return (
-             <button
-               key={cam.id}
-               onClick={() => toggleCam(cam.id)}
-               className={`absolute transform -translate-x-1/2 -translate-y-1/2 transition-all duration-300 group/cam ${isSelected ? 'scale-125 z-20' : 'scale-100 z-10 hover:scale-110'}`}
-               style={{ left: `${cam.x}%`, top: `${cam.y}%` }}
-             >
-               <div className={`relative flex items-center justify-center w-12 h-12 rounded-full backdrop-blur-sm border-2 ${isSelected ? 'bg-cyan-500/20 border-cyan-400 shadow-[0_0_20px_rgba(6,182,212,0.5)]' : 'bg-slate-900/60 border-slate-600'}`}>
-                 <Video className={`w-6 h-6 ${isSelected ? 'text-cyan-400' : 'text-slate-400'}`} />
-                 {/* Status Dot */}
-                 <div className="absolute top-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-slate-900"></div>
-               </div>
-               
-               {/* Label */}
-               <div className={`absolute top-full mt-2 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-1 bg-black/80 text-[10px] text-white rounded border border-slate-700 transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0 group-hover/cam:opacity-100'}`}>
-                 {cam.label}
-               </div>
-             </button>
-           );
-         })}
       </div>
 
       {/* RIGHT CONTROL PANEL (Drawer) */}
