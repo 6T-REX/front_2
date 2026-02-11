@@ -1,27 +1,123 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Search, Sparkles, Video, Clock, 
   ChevronRight, MapPin, Target, Shield,
   ArrowRight
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { parseCctvCsv, type CctvItem } from '../../lib/parseCctvCsv';
 
-// Mock CCTV Data (강남/테헤란로 일대 대략 좌표)
-const cameras = [
+const FALLBACK_CAMERAS: CctvItem[] = [
   { id: 'C01', label: '강남역 4번 출구', lat: 37.498095, lng: 127.027610 },
   { id: 'C02', label: '테헤란로 교차로', lat: 37.501408, lng: 127.039674 },
-  { id: 'C03', label: '역삼 하이츠',     lat: 37.499681, lng: 127.034302 },
-  { id: 'C04', label: '코엑스 동문',     lat: 37.511245, lng: 127.061004 },
-  { id: 'C05', label: '선릉 공원',       lat: 37.504560, lng: 127.049555 },
+  { id: 'C03', label: '역삼 하이츠', lat: 37.499681, lng: 127.034302 },
+  { id: 'C04', label: '코엑스 동문', lat: 37.511245, lng: 127.061004 },
+  { id: 'C05', label: '선릉 공원', lat: 37.504560, lng: 127.049555 },
 ];
+
+/** 두 위·경도 간 거리(m), Haversine */
+function getDistanceMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/** 클릭 지점에서 가장 가까운 n개 CCTV (정확히 n개만) */
+function findNearestCCTVs(list: CctvItem[], lat: number, lng: number, n: number): CctvItem[] {
+  return [...list]
+    .map((c) => ({ c, d: getDistanceMeters(lat, lng, c.lat, c.lng) }))
+    .sort((a, b) => a.d - b.d)
+    .slice(0, n)
+    .map((x) => x.c);
+}
+
+type MarkerPixel = { id: string; label: string; x: number; y: number };
 
 export default function AIInvestigation() {
   const [selectedCams, setSelectedCams] = useState<string[]>(['C01', 'C02']);
   const [query, setQuery] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [results, setResults] = useState<any[]>([]);
+  const [markerPixels, setMarkerPixels] = useState<MarkerPixel[]>([]);
+  const [openInfoId, setOpenInfoId] = useState<string | null>(null);
+  const [mapLevel, setMapLevel] = useState<number>(14);
+  const [isSelectingPoint, setIsSelectingPoint] = useState(false);
+  const [rippleCenter, setRippleCenter] = useState<{ x: number; y: number } | null>(null);
+  const [cameras, setCameras] = useState<CctvItem[]>(FALLBACK_CAMERAS);
+  const [clickedPin, setClickedPin] = useState<{ lat: number; lng: number } | null>(null);
+  const [selectedCctvIds, setSelectedCctvIds] = useState<Set<string>>(new Set());
+  const [viewMode, setViewMode] = useState<'map' | 'cctv'>('map');
+  const mapRef = useRef<any>(null);
+  const mapAreaRef = useRef<HTMLDivElement>(null);
+  const camerasRef = useRef<CctvItem[]>(FALLBACK_CAMERAS);
+  const circleRef = useRef<any>(null);
 
-  // Kakao 지도 초기화 (AI 정밀 추적용 CCTV 배경 지도)
+  const ZOOM_SHOW_MARKERS = 4; // 이 레벨 이하일 때 CCTV 표시 (12까지 = 더 가까이/줌 인해도 유지)
+
+  const updatePixelPositions = (map: any, camList: CctvItem[]) => {
+    const w = window as any;
+    if (!map || !w.kakao?.maps) return;
+    const proj = map.getProjection();
+    if (!proj || typeof proj.containerPointFromCoords !== 'function') return;
+
+    const next: MarkerPixel[] = camList.map((cam) => {
+      const latLng = new w.kakao.maps.LatLng(cam.lat, cam.lng);
+      const point = proj.containerPointFromCoords(latLng);
+      const x =
+        typeof (point as any)?.getX === 'function'
+          ? (point as any).getX()
+          : typeof (point as any)?.x === 'number'
+            ? (point as any).x
+            : 0;
+      const y =
+        typeof (point as any)?.getY === 'function'
+          ? (point as any).getY()
+          : typeof (point as any)?.y === 'number'
+            ? (point as any).y
+            : 0;
+      return { id: cam.id, label: cam.label, x, y };
+    });
+    setMarkerPixels(next);
+    if (typeof map.getLevel === 'function') setMapLevel(map.getLevel());
+  };
+
+  // 서울시 CCTV CSV 로드 (public/cctv_seoul.csv)
+  useEffect(() => {
+    const csvUrl = '/cctv_seoul.csv';
+    fetch(csvUrl)
+      .then((res) => {
+        if (!res.ok) throw new Error('CSV not found');
+        return res.arrayBuffer();
+      })
+      .then((buffer) => {
+        let text: string;
+        try {
+          text = new TextDecoder('euc-kr').decode(buffer);
+        } catch {
+          text = new TextDecoder('utf-8').decode(buffer);
+        }
+        const list = parseCctvCsv(text, 2000);
+        if (list.length > 0) {
+          setCameras(list);
+          camerasRef.current = list;
+        }
+      })
+      .catch(() => {
+        // CSV 없거나 파싱 실패 시 fallback 유지
+      });
+  }, []);
+
+  useEffect(() => {
+    camerasRef.current = cameras;
+    if (mapRef.current) updatePixelPositions(mapRef.current, cameras);
+  }, [cameras]);
+
+  // Kakao 지도 초기화 + 위경도 → 픽셀 오버레이용
   useEffect(() => {
     const w = window as any;
 
@@ -35,80 +131,21 @@ export default function AIInvestigation() {
       if (!container) return;
 
       const options = {
-        // 강남/테헤란로 일대 중심 (모의 CCTV 라벨과 맞추기 위한 대략 좌표)
-        center: new w.kakao.maps.LatLng(37.498095, 127.027610),
-        level: 5,
+        center: new w.kakao.maps.LatLng(37.5665, 126.978),
+        level: 6,
       };
 
       const map = new w.kakao.maps.Map(container, options);
+      mapRef.current = map;
 
-      // 실시간 교통 정보도 함께 표시
       map.addOverlayMapTypeId(w.kakao.maps.MapTypeId.TRAFFIC);
 
-      // CCTV 아이콘 이미지 (Kakao 샘플 스타일 마커 이미지)
-      // 참고: https://apis.map.kakao.com/web/sample/basicMarkerImage/
-      // 이 프로젝트의 public 폴더에 저장된 CCTV 아이콘 사용
-      // (예: 프로젝트 루트에 public/cctv-icon.png 로 저장)
-      const cctvImageSrc = "/cctv-icon.png";
-      const cctvImageSize = new w.kakao.maps.Size(32, 32);
-      const cctvImageOption = {
-        offset: new w.kakao.maps.Point(16, 32), // 아래 꼭짓점이 좌표에 맞도록 보정
-      };
-      const cctvImage = new w.kakao.maps.MarkerImage(
-        cctvImageSrc,
-        cctvImageSize,
-        cctvImageOption,
-      );
+      updatePixelPositions(map, camerasRef.current);
 
-      // CCTV를 지도 마커로 표시하고, 줌 레벨에 따라 토글
-      const markerData: { id: string; marker: any }[] = cameras.map((cam) => {
-        const position = new w.kakao.maps.LatLng(cam.lat, cam.lng);
-
-        const marker = new w.kakao.maps.Marker({
-          position,
-          image: cctvImage,
-          title: cam.label, // 기본 브라우저 툴팁에도 이름 노출
-          clickable: true,
-        });
-
-        // 기본은 지도에 붙여 둠 (줌 레벨에 따라 가렸다가 다시 보이게 함)
-        marker.setMap(map);
-
-        // CCTV 이름 인포윈도우 (클릭 시 열리고 X 버튼으로 닫기 가능)
-        // 참고: https://apis.map.kakao.com/web/sample/basicInfoWindow/
-        const infowindow = new w.kakao.maps.InfoWindow({
-          map, // 미리 어떤 지도에 붙을지 명시
-          position: position,
-          content: `<div style="padding:6px 10px;font-size:12px;white-space:nowrap;color:#111;">${cam.label}</div>`,
-          removable: true,
-        });
-
-        // 마커 클릭 시: 선택 토글 + 인포윈도우 열기
-        w.kakao.maps.event.addListener(marker, 'click', () => {
-          setSelectedCams((prev) =>
-            prev.includes(cam.id)
-              ? prev.filter((id: string) => id !== cam.id)
-              : [...prev, cam.id],
-          );
-          infowindow.open(map, marker);
-        });
-
-        return { id: cam.id, marker };
-      });
-
-      // 특정 줌 레벨 이상에서만 CCTV 마커 보이게
-      const LEVEL_THRESHOLD = 6; // 숫자가 작을수록 더 확대된 상태
-
-      const updateMarkerVisibility = () => {
-        const level = map.getLevel();
-        const visible = level <= LEVEL_THRESHOLD;
-        markerData.forEach(({ marker }) => {
-          marker.setMap(visible ? map : null);
-        });
-      };
-
-      updateMarkerVisibility();
-      w.kakao.maps.event.addListener(map, 'zoom_changed', updateMarkerVisibility);
+      const onMapChange = () => updatePixelPositions(map, camerasRef.current);
+      w.kakao.maps.event.addListener(map, 'zoom_changed', onMapChange);
+      w.kakao.maps.event.addListener(map, 'center_changed', onMapChange);
+      w.kakao.maps.event.addListener(map, 'bounds_changed', onMapChange);
     });
   }, []);
 
@@ -118,21 +155,108 @@ export default function AIInvestigation() {
     );
   };
 
+  /** 검색 시 표시한 범위 원 + 선택된 CCTV 하이라이트 제거 */
+  const clearSearchOverlays = () => {
+    if (circleRef.current) {
+      circleRef.current.setMap(null);
+      circleRef.current = null;
+    }
+    setSelectedCctvIds(new Set());
+    setViewMode('map');
+  };
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
     
     setIsAnalyzing(true);
-    setResults([]); // Clear previous
+    setResults([]);
+    setClickedPin(null);
+    setRippleCenter(null);
+    clearSearchOverlays();
 
-    // Simulate AI Stream processing
     setTimeout(() => {
       setIsAnalyzing(false);
       addResult(1);
       setTimeout(() => addResult(2), 800);
       setTimeout(() => addResult(3), 1800);
+      setIsSelectingPoint(true);
     }, 1500);
   };
+
+  /** 지도 클릭 시 해당 위·경도로 지점 선택 적용 (원 + 선택 9대) */
+  const applySelectionAtLatLng = (lat: number, lng: number) => {
+    const map = mapRef.current;
+    const w = window as any;
+    if (!map || !w.kakao?.maps) return;
+
+    const proj = map.getProjection();
+    if (proj && typeof proj.containerPointFromCoords === 'function') {
+      const latLng = new w.kakao.maps.LatLng(lat, lng);
+      const point = proj.containerPointFromCoords(latLng);
+      const x = typeof (point as any)?.getX === 'function' ? (point as any).getX() : (point as any)?.x ?? 0;
+      const y = typeof (point as any)?.getY === 'function' ? (point as any).getY() : (point as any)?.y ?? 0;
+      setRippleCenter({ x, y });
+    }
+    setIsSelectingPoint(false);
+    setClickedPin({ lat, lng });
+
+    const camList = camerasRef.current;
+    if (camList.length === 0) return;
+
+    const nearest9 = findNearestCCTVs(camList, lat, lng, 9).slice(0, 9);
+    clearSearchOverlays();
+
+    const radiusM = Math.max(
+      ...nearest9.map((c) => getDistanceMeters(lat, lng, c.lat, c.lng)),
+      100
+    );
+    const circle = new w.kakao.maps.Circle({
+      center: new w.kakao.maps.LatLng(lat, lng),
+      radius: radiusM * 1.05,
+      strokeWeight: 2,
+      strokeColor: '#06b6d4',
+      strokeOpacity: 0.9,
+      fillColor: '#06b6d4',
+      fillOpacity: 0.12,
+    });
+    circle.setMap(map);
+    circleRef.current = circle;
+    setSelectedCctvIds(new Set(nearest9.map((c) => c.id)));
+  };
+
+  // 지점 선택 모드일 때 지도 클릭 리스너 (지도는 그대로 드래그·줌 가능)
+  useEffect(() => {
+    const map = mapRef.current;
+    const w = window as any;
+    if (!isSelectingPoint || !map || !w.kakao?.maps.event) return;
+
+    const listener = (mouseEvent: any) => {
+      const latLng = mouseEvent.latLng;
+      if (!latLng) return;
+      const lat = typeof latLng.getLat === 'function' ? latLng.getLat() : latLng.lat;
+      const lng = typeof latLng.getLng === 'function' ? latLng.getLng() : latLng.lng;
+      applySelectionAtLatLng(lat, lng);
+    };
+    w.kakao.maps.event.addListener(map, 'click', listener);
+    return () => {
+      w.kakao.maps.event.removeListener(map, 'click', listener);
+    };
+  }, [isSelectingPoint]);
+
+  // Ctrl+`: 지도 ↔ CCTV 화면 전환 (Alt+Tab은 OS에서 가로챔)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && (e.key === '`' || e.key === 'Backquote')) {
+        e.preventDefault();
+        setViewMode((prev) => (prev === 'map' ? 'cctv' : 'map'));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const selectedCctvList = cameras.filter((c) => selectedCctvIds.has(c.id)).slice(0, 9);
 
   const addResult = (id: number) => {
     const newResult = {
@@ -152,10 +276,141 @@ export default function AIInvestigation() {
   return (
     <div className="relative w-full h-full overflow-hidden bg-[#0F172A] flex">
       {/* MAP AREA */}
-      <div className="flex-1 relative overflow-hidden group">
-        {/* Kakao Map Background for CCTV selection */}
+      <div
+        ref={mapAreaRef}
+        className="flex-1 relative overflow-hidden group"
+      >
+        {/* Kakao Map (API만 사용, 마커는 아래 오버레이로) */}
         <div id="ai-map" className="absolute inset-0 z-0" />
 
+        {/* 지점 선택 안내: 지도는 그대로 움직일 수 있고, 클릭 시 해당 위치 선택 */}
+        <AnimatePresence>
+          {isSelectingPoint && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              className="absolute bottom-6 left-1/2 z-20 -translate-x-1/2 pointer-events-none"
+            >
+              <div className="px-5 py-3 rounded-xl bg-slate-800/95 border border-slate-600 shadow-xl backdrop-blur-sm text-center flex items-center gap-3">
+                <MapPin className="w-6 h-6 text-cyan-400 flex-shrink-0" />
+                <p className="text-white font-medium text-sm">
+                  지도에서 추적할 지점을 클릭하세요 · 지도는 드래그·줌 가능
+                </p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* 선택한 지점 주변 회색 그라데이션 리플 애니메이션 */}
+        {rippleCenter && (
+          <div className="absolute inset-0 z-[12] pointer-events-none">
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="absolute w-48 h-48 rounded-full"
+                style={{
+                  left: rippleCenter.x,
+                  top: rippleCenter.y,
+                  transform: 'translate(-50%, -50%)',
+                  background: 'radial-gradient(circle, rgba(148,163,184,0.25) 0%, rgba(148,163,184,0.08) 40%, transparent 70%)',
+                  animation: 'map-point-ripple 2.2s ease-out infinite',
+                  animationDelay: `${i * 0.7}s`,
+                }}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* 위경도 기준 픽셀 오버레이: 지도 API 위에 React로 얹는 CCTV (줌인 시에만 표시) */}
+        <div className="absolute inset-0 z-10 pointer-events-none">
+          {mapLevel <= ZOOM_SHOW_MARKERS &&
+            markerPixels.map((mp) => (
+            <div
+              key={mp.id}
+              className="absolute pointer-events-auto cursor-pointer"
+              style={{
+                left: mp.x,
+                top: mp.y,
+                transform: 'translate(-50%, -100%)',
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleCam(mp.id);
+                setOpenInfoId((prev) => (prev === mp.id ? null : mp.id));
+              }}
+              onMouseEnter={() => setOpenInfoId(mp.id)}
+              onMouseLeave={() => setOpenInfoId(null)}
+            >
+              <div
+                className={`flex flex-col items-center transition-transform ${
+                  selectedCams.includes(mp.id)
+                    ? 'scale-110'
+                    : 'hover:scale-105'
+                }`}
+              >
+                <div
+                  className={`flex items-center justify-center rounded-full p-0.5 ${
+                    selectedCams.includes(mp.id)
+                      ? 'drop-shadow-[0_0_8px_rgba(6,182,212,0.6)]'
+                      : ''
+                  } ${selectedCctvIds.has(mp.id) ? 'ring-2 ring-green-500' : ''}`}
+                >
+                  <img
+                    src="/cctv-icon.png"
+                    alt="CCTV"
+                    className="w-8 h-8 object-contain"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).style.display = 'none';
+                    }}
+                  />
+                </div>
+                {(openInfoId === mp.id || selectedCams.includes(mp.id)) && (
+                  <div className="mt-1 px-2 py-1 rounded bg-slate-900/95 text-white text-xs whitespace-nowrap border border-slate-600 shadow-lg">
+                    {mp.label}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* CCTV 화면 전체 오버레이 (Ctrl+` 로 전환) */}
+        <AnimatePresence>
+          {viewMode === 'cctv' && selectedCctvList.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 z-30 bg-slate-950 flex flex-col p-4 gap-3"
+            >
+              <div className="flex items-center justify-between flex-shrink-0">
+                <span className="text-sm font-semibold text-slate-300">선택된 CCTV 화면</span>
+                <span className="text-xs text-slate-500">Ctrl+` · 지도 보기</span>
+              </div>
+              <div className="flex-1 grid grid-cols-3 gap-2 min-h-0">
+                {selectedCctvList.map((cctv, idx) => (
+                  <div
+                    key={cctv.id}
+                    className="rounded-lg overflow-hidden border border-slate-600 bg-slate-800/90 flex flex-col min-h-0"
+                  >
+                    <div className="flex-1 min-h-0 bg-slate-900 flex items-center justify-center">
+                      <div className="flex flex-col items-center gap-2 text-slate-500">
+                        <Video className="w-10 h-10 opacity-50" />
+                        <span className="text-xs font-mono">CCTV-{idx + 1}</span>
+                      </div>
+                    </div>
+                    <div className="px-2 py-1.5 bg-slate-900/80 border-t border-slate-700/50 flex-shrink-0">
+                      <p className="text-[10px] text-slate-400 truncate" title={cctv.label}>
+                        {cctv.label || `CCTV ${idx + 1}`}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* RIGHT CONTROL PANEL (Drawer) */}
@@ -200,6 +455,18 @@ export default function AIInvestigation() {
              )}
            </button>
         </div>
+
+        {/* 선택된 CCTV · Alt+Tab 안내 */}
+        {selectedCctvIds.size > 0 && (
+          <div className="border-t border-slate-700/50 flex-shrink-0 p-3 bg-slate-900/50">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-400">선택 CCTV {selectedCctvIds.size}대</span>
+              <span className="text-[10px] text-cyan-400/90 font-mono">
+                {viewMode === 'map' ? 'Ctrl+` → CCTV 화면' : 'Ctrl+` → 지도'}
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Results Stream */}
         <div className="flex-1 overflow-hidden flex flex-col bg-slate-950/30">

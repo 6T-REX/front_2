@@ -1,3 +1,15 @@
 @import './fonts.css';
 @import './tailwind.css';
 @import './theme.css';
+
+/* 지도 지점 선택 리플 애니메이션 (AI 정밀 추적) */
+@keyframes map-point-ripple {
+  0% {
+    transform: translate(-50%, -50%) scale(0);
+    opacity: 0.35;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2.5);
+    opacity: 0;
+  }
+}
