@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Eye, ArrowRight, Lock, User } from 'lucide-react';
 
 interface LoginProps {
-  onLogin: () => void;
+  onLogin: (userRole: 'user' | 'admin', userName: string) => void;
 }
 
 export default function Login({ onLogin }: LoginProps) {
@@ -13,10 +13,32 @@ export default function Login({ onLogin }: LoginProps) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
+
+    let userRole: 'user' | 'admin' = 'user';
+    let userName = '김가네';
+
+    const idLower = id.toLowerCase();
+    if (idLower === 'admin0') {
+      userRole = 'admin';
+      userName = '김인경';
+    } else if (idLower === 'admin1') {
+      userRole = 'admin';
+      userName = '강창우';
+    } else if (idLower === 'admin2') {
+      userRole = 'admin';
+      userName = '박승수';
+    } else if (idLower === 'admin') {
+      userRole = 'admin';
+      userName = '김인경';
+    } else if (idLower === 'user') {
+      userRole = 'user';
+      userName = '김가네';
+    }
+
     // Simulate API call
     setTimeout(() => {
       setIsLoading(false);
-      onLogin();
+      onLogin(userRole, userName);
     }, 1500);
   };
 

@@ -11,9 +11,11 @@ interface SidebarProps {
   isCollapsed: boolean;
   toggleSidebar: () => void;
   onLogout: () => void;
+  userName: string;
+  userRole: 'user' | 'admin';
 }
 
-export default function Sidebar({ currentView, setCurrentView, isCollapsed, toggleSidebar, onLogout }: SidebarProps) {
+export default function Sidebar({ currentView, setCurrentView, isCollapsed, toggleSidebar, onLogout, userName, userRole }: SidebarProps) {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -145,7 +147,7 @@ export default function Sidebar({ currentView, setCurrentView, isCollapsed, togg
           )}
         >
           <div className="w-8 h-8 flex-shrink-0 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white font-bold text-xs shadow-lg relative">
-            A
+            {userName.charAt(0)}
             <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-slate-900 rounded-full flex items-center justify-center">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
             </div>
@@ -155,12 +157,22 @@ export default function Sidebar({ currentView, setCurrentView, isCollapsed, togg
             "transition-all duration-300 whitespace-nowrap overflow-hidden text-left",
             isCollapsed ? "w-0 opacity-0" : "w-auto opacity-100"
           )}>
-            <div className="text-xs font-bold text-slate-200">관리자</div>
+            <div className="text-xs font-bold text-slate-200">{userName}</div>
             <div className="text-[10px] text-green-400">
-              접속 중
+              {userRole === 'admin' ? '개발자' : '관리자(실사용자)'}
             </div>
           </div>
         </button>
+
+        {!isCollapsed && (
+          <button
+            onClick={onLogout}
+            className="mt-2 w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors border border-red-500/20"
+          >
+            <LogOut size={16} />
+            <span>로그아웃</span>
+          </button>
+        )}
       </div>
     </div>
   );
