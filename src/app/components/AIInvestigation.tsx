@@ -51,6 +51,7 @@ export default function AIInvestigation() {
   const [cameras, setCameras] = useState<CctvItem[]>(FALLBACK_CAMERAS);
   const [clickedPin, setClickedPin] = useState<{ lat: number; lng: number } | null>(null);
   const [selectedCctvIds, setSelectedCctvIds] = useState<Set<string>>(new Set());
+  const [displayedCameraIds, setDisplayedCameraIds] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<'map' | 'cctv'>('map');
   const mapRef = useRef<any>(null);
   const mapAreaRef = useRef<HTMLDivElement>(null);
@@ -155,13 +156,14 @@ export default function AIInvestigation() {
     );
   };
 
-  /** 검색 시 표시한 범위 원 + 선택된 CCTV 하이라이트 제거 */
+  /** 검색 시 표시한 범위 원 + 선택된 CCTV 하이라이트 + 지도 아이콘 제거 */
   const clearSearchOverlays = () => {
     if (circleRef.current) {
       circleRef.current.setMap(null);
       circleRef.current = null;
     }
     setSelectedCctvIds(new Set());
+    setDisplayedCameraIds(new Set());
     setViewMode('map');
   };
 
@@ -223,6 +225,29 @@ export default function AIInvestigation() {
     circle.setMap(map);
     circleRef.current = circle;
     setSelectedCctvIds(new Set(nearest9.map((c) => c.id)));
+    setDisplayedCameraIds(new Set(nearest9.map((c) => c.id)));
+    setResults((prev) =>
+      prev.map((r, i) => ({ ...r, cctvId: r.cctvId ?? nearest9[i % 9]?.id ?? null }))
+    );
+  };
+
+  /** 현재 보이는 지도 범위 안의 CCTV만 아이콘 표시 */
+  const showCctvInVisibleBounds = () => {
+    const map = mapRef.current;
+    const w = window as any;
+    if (!map || !w.kakao?.maps) return;
+    const bounds = map.getBounds();
+    if (!bounds || typeof bounds.getSouthWest !== 'function') return;
+    const sw = bounds.getSouthWest();
+    const ne = bounds.getNorthEast();
+    const latMin = Math.min(sw.getLat(), ne.getLat());
+    const latMax = Math.max(sw.getLat(), ne.getLat());
+    const lngMin = Math.min(sw.getLng(), ne.getLng());
+    const lngMax = Math.max(sw.getLng(), ne.getLng());
+    const inBounds = camerasRef.current.filter(
+      (c) => c.lat >= latMin && c.lat <= latMax && c.lng >= lngMin && c.lng <= lngMax
+    );
+    setDisplayedCameraIds(new Set(inBounds.map((c) => c.id)));
   };
 
   // 지점 선택 모드일 때 지도 클릭 리스너 (지도는 그대로 드래그·줌 가능)
@@ -268,9 +293,24 @@ export default function AIInvestigation() {
       loc: id === 1 ? '강남역' : '테헤란로',
       img: id === 1 
         ? 'https://images.unsplash.com/photo-1649963233289-b9ecd40c4c77?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=400' 
-        : 'https://images.unsplash.com/photo-1638381717660-00e0f825e145?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=400'
+        : 'https://images.unsplash.com/photo-1638381717660-00e0f825e145?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=400',
+      cctvId: null as string | null,
     };
     setResults(prev => [newResult, ...prev]);
+  };
+
+  /** 감지 스트림에서 한 건 클릭 → 그 객체가 감지된 CCTV를 새 중심으로 9개 다시 찾기 */
+  const handleResultClick = (res: { cctvId?: string | null }) => {
+    const cctvId = res.cctvId;
+    if (!cctvId) return;
+    const cctv = camerasRef.current.find((c) => c.id === cctvId);
+    if (!cctv) return;
+    const w = window as any;
+    applySelectionAtLatLng(cctv.lat, cctv.lng);
+    setViewMode('map');
+    if (mapRef.current && w.kakao?.maps) {
+      mapRef.current.panTo(new w.kakao.maps.LatLng(cctv.lat, cctv.lng));
+    }
   };
 
   return (
@@ -295,7 +335,7 @@ export default function AIInvestigation() {
               <div className="px-5 py-3 rounded-xl bg-slate-800/95 border border-slate-600 shadow-xl backdrop-blur-sm text-center flex items-center gap-3">
                 <MapPin className="w-6 h-6 text-cyan-400 flex-shrink-0" />
                 <p className="text-white font-medium text-sm">
-                  지도에서 추적할 지점을 클릭하세요 · 지도는 드래그·줌 가능
+                  지도에서 추적할 지점을 클릭하세요
                 </p>
               </div>
             </motion.div>
@@ -322,10 +362,12 @@ export default function AIInvestigation() {
           </div>
         )}
 
-        {/* 위경도 기준 픽셀 오버레이: 지도 API 위에 React로 얹는 CCTV (줌인 시에만 표시) */}
+        {/* CCTV 아이콘: displayedCameraIds에 있는 것만 표시 (처음엔 없음 → 지도 클릭 시 9개 / 버튼 시 보이는 범위) */}
         <div className="absolute inset-0 z-10 pointer-events-none">
-          {mapLevel <= ZOOM_SHOW_MARKERS &&
-            markerPixels.map((mp) => (
+          {displayedCameraIds.size > 0 &&
+            markerPixels
+              .filter((mp) => displayedCameraIds.has(mp.id))
+              .map((mp) => (
             <div
               key={mp.id}
               className="absolute pointer-events-auto cursor-pointer"
@@ -425,6 +467,14 @@ export default function AIInvestigation() {
              <h2 className="text-xl font-bold text-white tracking-wide">AI 스마트 검색</h2>
            </div>
            <p className="text-xs text-slate-400">카메라를 선택하고 추적할 대상을 설명하세요.</p>
+           <button
+             type="button"
+             onClick={showCctvInVisibleBounds}
+             className="mt-3 w-full py-2 px-3 rounded-lg border border-slate-600 bg-slate-800/80 hover:bg-slate-700/80 hover:border-slate-500 text-slate-300 text-sm font-medium transition-colors flex items-center justify-center gap-2"
+           >
+             <MapPin className="w-4 h-4" />
+             현재 지점에서 CCTV 찾기
+           </button>
         </div>
 
         {/* Input Area */}
@@ -483,7 +533,13 @@ export default function AIInvestigation() {
                    initial={{ opacity: 0, x: 50 }}
                    animate={{ opacity: 1, x: 0 }}
                    transition={{ delay: idx * 0.1 }}
-                   className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden hover:border-cyan-500/40 transition-colors group"
+                   role="button"
+                   tabIndex={0}
+                   onClick={() => handleResultClick(res)}
+                   onKeyDown={(e) => e.key === 'Enter' && handleResultClick(res)}
+                   className={`bg-slate-900 border rounded-xl overflow-hidden transition-colors group cursor-pointer ${
+                     res.cctvId ? 'border-slate-700 hover:border-cyan-500/50' : 'border-slate-700 opacity-90'
+                   }`}
                  >
                     <div className="flex">
                       <div className="w-24 h-24 bg-black relative">
@@ -504,6 +560,9 @@ export default function AIInvestigation() {
                          </div>
                          <div className="flex items-center gap-1 text-[10px] text-slate-500 mt-2">
                            <MapPin className="h-3 w-3" /> {res.loc}
+                           {res.cctvId && (
+                             <span className="text-[9px] text-cyan-500/80 ml-1">· 클릭 시 해당 CCTV 중심</span>
+                           )}
                          </div>
                       </div>
                     </div>
